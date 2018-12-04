@@ -32,7 +32,8 @@ using namespace Konsole;
 // function copied from kdelibs/kio/kio/kurlcompletion.cpp
 static bool expandEnv(QString & text);
 
-ShellCommand::ShellCommand(const QString & fullCommand)
+ShellCommand::ShellCommand(
+    const QString & fullCommand)
 {
     bool inQuotes = false;
 
@@ -58,7 +59,9 @@ ShellCommand::ShellCommand(const QString & fullCommand)
         }
     }
 }
-ShellCommand::ShellCommand(const QString & command , const QStringList & arguments)
+ShellCommand::ShellCommand(
+    const QString & command ,
+    const QStringList & arguments)
 {
     _arguments = arguments;
 

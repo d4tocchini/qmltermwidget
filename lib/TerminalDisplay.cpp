@@ -99,7 +99,7 @@ const ColorEntry Konsole::base_color_table[TABLE_COLORS] =
 
 // static
 bool TerminalDisplay::_antialiasText = true;
-bool TerminalDisplay::HAVE_TRANSPARENCY = false;
+bool TerminalDisplay::HAVE_TRANSPARENCY = true;
 
 // we use this to force QPainter to display text in LTR mode
 // more information can be found in: http://unicode.org/reports/tr9/
@@ -123,7 +123,8 @@ ScreenWindow* TerminalDisplay::screenWindow() const
 {
     return _screenWindow;
 }
-void TerminalDisplay::setScreenWindow(ScreenWindow* window)
+void TerminalDisplay::setScreenWindow(
+    ScreenWindow* window)
 {
     // disconnect existing screen window if any
     if ( _screenWindow )
@@ -151,7 +152,8 @@ const ColorEntry* TerminalDisplay::colorTable() const
 {
   return _colorTable;
 }
-void TerminalDisplay::setBackgroundColor(const QColor& color)
+void TerminalDisplay::setBackgroundColor(
+    const QColor& color)
 {
     _colorTable[DEFAULT_BACK_COLOR].color = color;
     QPalette p = palette();
@@ -163,13 +165,15 @@ void TerminalDisplay::setBackgroundColor(const QColor& color)
 
     update();
 }
-void TerminalDisplay::setForegroundColor(const QColor& color)
+void TerminalDisplay::setForegroundColor(
+    const QColor& color)
 {
     _colorTable[DEFAULT_FORE_COLOR].color = color;
 
     update();
 }
-void TerminalDisplay::setColorTable(const ColorEntry table[])
+void TerminalDisplay::setColorTable(
+    const ColorEntry table[])
 {
   for (int i = 0; i < TABLE_COLORS; i++)
       _colorTable[i] = table[i];
@@ -195,12 +199,16 @@ void TerminalDisplay::setColorTable(const ColorEntry table[])
    QCodec.
 */
 
-static inline bool isLineChar(wchar_t c) { return ((c & 0xFF80) == 0x2500);}
-static inline bool isLineCharString(const std::wstring& string)
+static inline bool isLineChar(
+    wchar_t c)
 {
-        return (string.length() > 0) && (isLineChar(string[0]));
+    return ((c & 0xFF80) == 0x2500);
 }
-
+static inline bool isLineCharString(
+    const std::wstring& string)
+{
+    return (string.length() > 0) && (isLineChar(string[0]));
+}
 
 // assert for i in [0..31] : vt100extended(vt100_graphics[i]) == i.
 
@@ -278,7 +286,8 @@ void TerminalDisplay::setVTFont(const QFont& f)
   emit vtFontChanged();
 }
 
-void TerminalDisplay::setBoldIntense(bool value)
+void TerminalDisplay::setBoldIntense(
+    bool value)
 {
     if ( _boldIntense != value ) {
         _boldIntense = value;
@@ -286,10 +295,158 @@ void TerminalDisplay::setBoldIntense(bool value)
     }
 }
 
-void TerminalDisplay::setFont(const QFont &f)
+void TerminalDisplay::setFont(
+    const QFont &f)
 {
     Q_UNUSED(f);
     // ignore font change request if not coming from konsole itself
+}
+
+
+// TODO QMLTERMWIDGET We should double check if we need this to fix the vertical truncation issue.
+
+void TerminalDisplay::paint(QPainter *painter)
+{
+    QRect clipRect = painter->clipBoundingRect().toAlignedRect();
+    QRect dirtyRect = clipRect.isValid() ? clipRect : contentsRect();
+    drawContents(*painter, dirtyRect);
+}
+
+void TerminalDisplay::drawContents(QPainter &painter, const QRect &rect)
+{
+     painter.setPen(_cursorColor);
+    painter.drawRect(100,
+                             100,
+                             500,
+                             500);
+    painter.fillRect(100,
+                             100,
+                             500,
+                             500,QColor(255, 0, 0, 120));
+  QPoint tL  = contentsRect().topLeft();
+  int    tLx = tL.x();
+  int    tLy = tL.y();
+  int lux = qMin(_usedColumns-1, qMax(0,(rect.left()   - tLx - _leftMargin ) / _fontWidth));
+  int luy = qMin(_usedLines-1,   qMax(0,(rect.top()    - tLy - _topMargin  ) / _fontHeight));
+  int rlx = qMin(_usedColumns-1, qMax(0,(rect.right()  - tLx - _leftMargin ) / _fontWidth));
+  int rly = qMin(_usedLines-1,   qMax(0,(rect.bottom() - tLy - _topMargin  ) / _fontHeight));
+
+  if(!_image)
+      return;
+
+  const int bufferSize = _usedColumns;
+  std::wstring unistr;
+  unistr.reserve(bufferSize);
+  for (int y = luy; y <= rly; y++)
+  {
+    quint32 c = _image[loc(lux,y)].character;
+    int x = lux;
+    if(!c && x)
+      x--; // Search for start of multi-column character
+    for (; x <= rlx; x++)
+    {
+      int len = 1;
+      int p = 0;
+      // reset our buffer to the maximal size
+      unistr.resize(bufferSize);
+
+      // is this a single character or a sequence of characters ?
+      if ( _image[loc(x,y)].rendition & RE_EXTENDED_CHAR )
+      {
+        // sequence of characters
+        ushort extendedCharLength = 0;
+        ushort* chars = ExtendedCharTable::instance
+                            .lookupExtendedChar(_image[loc(x,y)].charSequence,extendedCharLength);
+        for ( int index = 0 ; index < extendedCharLength ; index++ )
+        {
+            Q_ASSERT( p < bufferSize );
+            unistr[p++] = chars[index];
+        }
+      }
+      else
+      {
+        // single character
+        c = _image[loc(x,y)].character;
+        if (c)
+        {
+             Q_ASSERT( p < bufferSize );
+             unistr[p++] = c; //fontMap(c);
+        }
+      }
+
+      bool lineDraw = isLineChar(c);
+      bool doubleWidth = (_image[ qMin(loc(x,y)+1,_imageSize) ].character == 0);
+      CharacterColor currentForeground = _image[loc(x,y)].foregroundColor;
+      CharacterColor currentBackground = _image[loc(x,y)].backgroundColor;
+      quint8 currentRendition = _image[loc(x,y)].rendition;
+
+      while (x+len <= rlx &&
+             _image[loc(x+len,y)].foregroundColor == currentForeground &&
+             _image[loc(x+len,y)].backgroundColor == currentBackground &&
+             _image[loc(x+len,y)].rendition == currentRendition &&
+             (_image[ qMin(loc(x+len,y)+1,_imageSize) ].character == 0) == doubleWidth &&
+             isLineChar( c = _image[loc(x+len,y)].character) == lineDraw) // Assignment!
+      {
+        if (c)
+          unistr[p++] = c; //fontMap(c);
+        if (doubleWidth) // assert((_image[loc(x+len,y)+1].character == 0)), see above if condition
+          len++; // Skip trailing part of multi-column character
+        len++;
+      }
+      if ((x+len < _usedColumns) && (!_image[loc(x+len,y)].character))
+        len++; // Adjust for trailing part of multi-column character
+
+            bool save__fixedFont = _fixedFont;
+         if (lineDraw)
+            _fixedFont = false;
+         unistr.resize(p);
+         // Create a text scaling matrix for double width and double height lines.
+         QTransform textScale;
+
+         if (y < _lineProperties.size())
+         {
+            if (_lineProperties[y] & LINE_DOUBLEWIDTH)
+                textScale.scale(2,1);
+            if (_lineProperties[y] & LINE_DOUBLEHEIGHT)
+                textScale.scale(1,2);
+         }
+         //Apply text scaling matrix.
+         painter.setWorldTransform(textScale, true);
+         //calculate the area in which the text will be drawn
+         QRect textArea = calculateTextArea(tLx, tLy, x, y, len);
+
+         //move the calculated area to take account of scaling applied to the painter.
+         //the position of the area from the origin (0,0) is scaled
+         //by the opposite of whatever
+         //transformation has been applied to the painter.  this ensures that
+         //painting does actually start from textArea.topLeft()
+         //(instead of textArea.topLeft() * painter-scale)
+         textArea.moveTopLeft( textScale.inverted().map(textArea.topLeft()) );
+
+         //paint text fragment
+         drawTextFragment(    painter,
+                            textArea,
+                            unistr,
+                            &_image[loc(x,y)] ); //,
+                            //0,
+                            //!_isPrinting );
+         _fixedFont = save__fixedFont;
+         //reset back to single-width, single-height _lines
+         painter.setWorldTransform(textScale.inverted(), true);
+
+         if (y < _lineProperties.size()-1)
+         {
+            //double-height _lines are represented by two adjacent _lines
+            //containing the same characters
+            //both _lines will have the LINE_DOUBLEHEIGHT attribute.
+            //If the current line has the LINE_DOUBLEHEIGHT attribute,
+            //we can therefore skip the next line
+            if (_lineProperties[y] & LINE_DOUBLEHEIGHT)
+                y++;
+         }
+        x += len - 1;
+    }
+  }
 }
 
 /* ------------------------------------------------------------------------- */
@@ -341,17 +498,18 @@ TerminalDisplay::TerminalDisplay(QQuickItem *parent)
 ,_resizeTimer(0)
 ,_flowControlWarningEnabled(false)
 ,_outputSuspendedLabel(0)
-,_lineSpacing(0)
+// ,_lineSpacing(0)
+,_lineSpacing(6)
 ,_colorsInverted(false)
-,_blendColor(qRgba(0,0,0,0xff))
+,_blendColor(qRgba(0,0,0,0x00))
 ,_filterChain(new TerminalImageFilterChain())
 ,_cursorShape(Emulation::KeyboardCursorShape::BlockCursor)
 ,mMotionAfterPasting(NoMoveScreenWindow)
 ,m_font("Monospace", 12)
 ,m_color_role(QPalette::Background)
 ,m_full_cursor_height(false)
-,_leftBaseMargin(1)
-,_topBaseMargin(1)
+,_leftBaseMargin(20)
+,_topBaseMargin(24)
 {
   // terminal applications are not designed with Right-To-Left in mind,
   // so the layout is forced to Left-To-Right
@@ -490,7 +648,11 @@ enum LineEncode
 
 #include "LineFont.h"
 
-static void drawLineChar(QPainter& paint, int x, int y, int w, int h, uint8_t code)
+static void drawLineChar(
+    QPainter& paint,
+    int x, int y,
+    int w, int h,
+    uint8_t code)
 {
     //Calculate cell midpoints, end points.
     int cx = x + w/2;
@@ -556,7 +718,11 @@ static void drawLineChar(QPainter& paint, int x, int y, int w, int h, uint8_t co
 
 }
 
-static void drawOtherChar(QPainter& paint, int x, int y, int w, int h, uchar code)
+static void drawOtherChar(
+    QPainter& paint,
+    int x, int y,
+    int w, int h,
+    uchar code)
 {
     //Calculate cell midpoints, end points.
     const int cx = x + w / 2;
@@ -637,8 +803,11 @@ static void drawOtherChar(QPainter& paint, int x, int y, int w, int h, uchar cod
     }
 }
 
-void TerminalDisplay::drawLineCharString(    QPainter& painter, int x, int y, const std::wstring& str,
-                                    const Character* attributes)
+void TerminalDisplay::drawLineCharString(
+    QPainter& painter,
+    int x, int y,
+    const std::wstring& str,
+    const Character* attributes)
 {
         const QPen& currentPen = painter.pen();
 
@@ -720,7 +889,11 @@ void TerminalDisplay::setBackgroundImage(QString backgroundImage)
     }
 }
 
-void TerminalDisplay::drawBackground(QPainter& painter, const QRect& rect, const QColor& backgroundColor, bool useOpacitySetting )
+void TerminalDisplay::drawBackground(
+    QPainter& painter,
+    const QRect& rect,
+    const QColor& backgroundColor,
+    bool useOpacitySetting )
 {
         // The whole widget rectangle is filled by the background color from
         // the color scheme set in setColorTable(), while the scrollbar is
@@ -1359,15 +1532,6 @@ void TerminalDisplay::focusInEvent(QFocusEvent*)
         _blinkTimer->start();
 }
 
-// TODO QMLTERMWIDGET We should double check if we need this to fix the vertical truncation issue.
-
-void TerminalDisplay::paint(QPainter *painter)
-{
-    QRect clipRect = painter->clipBoundingRect().toAlignedRect();
-    QRect dirtyRect = clipRect.isValid() ? clipRect : contentsRect();
-    drawContents(*painter, dirtyRect);
-}
-
 QPoint TerminalDisplay::cursorPosition() const
 {
     if (_screenWindow)
@@ -1549,142 +1713,7 @@ QRect TerminalDisplay::calculateTextArea(int topLeftX, int topLeftY, int startCo
                _fontHeight);
 }
 
-void TerminalDisplay::drawContents(QPainter &paint, const QRect &rect)
-{
-  QPoint tL  = contentsRect().topLeft();
-  int    tLx = tL.x();
-  int    tLy = tL.y();
 
-  int lux = qMin(_usedColumns-1, qMax(0,(rect.left()   - tLx - _leftMargin ) / _fontWidth));
-  int luy = qMin(_usedLines-1,   qMax(0,(rect.top()    - tLy - _topMargin  ) / _fontHeight));
-  int rlx = qMin(_usedColumns-1, qMax(0,(rect.right()  - tLx - _leftMargin ) / _fontWidth));
-  int rly = qMin(_usedLines-1,   qMax(0,(rect.bottom() - tLy - _topMargin  ) / _fontHeight));
-
-  if(!_image)
-      return;
-
-  const int bufferSize = _usedColumns;
-  std::wstring unistr;
-  unistr.reserve(bufferSize);
-  for (int y = luy; y <= rly; y++)
-  {
-    quint32 c = _image[loc(lux,y)].character;
-    int x = lux;
-    if(!c && x)
-      x--; // Search for start of multi-column character
-    for (; x <= rlx; x++)
-    {
-      int len = 1;
-      int p = 0;
-
-      // reset our buffer to the maximal size
-      unistr.resize(bufferSize);
-
-      // is this a single character or a sequence of characters ?
-      if ( _image[loc(x,y)].rendition & RE_EXTENDED_CHAR )
-      {
-        // sequence of characters
-        ushort extendedCharLength = 0;
-        ushort* chars = ExtendedCharTable::instance
-                            .lookupExtendedChar(_image[loc(x,y)].charSequence,extendedCharLength);
-        for ( int index = 0 ; index < extendedCharLength ; index++ )
-        {
-            Q_ASSERT( p < bufferSize );
-            unistr[p++] = chars[index];
-        }
-      }
-      else
-      {
-        // single character
-        c = _image[loc(x,y)].character;
-        if (c)
-        {
-             Q_ASSERT( p < bufferSize );
-             unistr[p++] = c; //fontMap(c);
-        }
-      }
-
-      bool lineDraw = isLineChar(c);
-      bool doubleWidth = (_image[ qMin(loc(x,y)+1,_imageSize) ].character == 0);
-      CharacterColor currentForeground = _image[loc(x,y)].foregroundColor;
-      CharacterColor currentBackground = _image[loc(x,y)].backgroundColor;
-      quint8 currentRendition = _image[loc(x,y)].rendition;
-
-      while (x+len <= rlx &&
-             _image[loc(x+len,y)].foregroundColor == currentForeground &&
-             _image[loc(x+len,y)].backgroundColor == currentBackground &&
-             _image[loc(x+len,y)].rendition == currentRendition &&
-             (_image[ qMin(loc(x+len,y)+1,_imageSize) ].character == 0) == doubleWidth &&
-             isLineChar( c = _image[loc(x+len,y)].character) == lineDraw) // Assignment!
-      {
-        if (c)
-          unistr[p++] = c; //fontMap(c);
-        if (doubleWidth) // assert((_image[loc(x+len,y)+1].character == 0)), see above if condition
-          len++; // Skip trailing part of multi-column character
-        len++;
-      }
-      if ((x+len < _usedColumns) && (!_image[loc(x+len,y)].character))
-        len++; // Adjust for trailing part of multi-column character
-
-            bool save__fixedFont = _fixedFont;
-         if (lineDraw)
-            _fixedFont = false;
-         unistr.resize(p);
-
-         // Create a text scaling matrix for double width and double height lines.
-         QTransform textScale;
-
-         if (y < _lineProperties.size())
-         {
-            if (_lineProperties[y] & LINE_DOUBLEWIDTH)
-                textScale.scale(2,1);
-
-            if (_lineProperties[y] & LINE_DOUBLEHEIGHT)
-                textScale.scale(1,2);
-         }
-
-         //Apply text scaling matrix.
-         paint.setWorldTransform(textScale, true);
-
-         //calculate the area in which the text will be drawn
-         QRect textArea = calculateTextArea(tLx, tLy, x, y, len);
-
-         //move the calculated area to take account of scaling applied to the painter.
-         //the position of the area from the origin (0,0) is scaled
-         //by the opposite of whatever
-         //transformation has been applied to the painter.  this ensures that
-         //painting does actually start from textArea.topLeft()
-         //(instead of textArea.topLeft() * painter-scale)
-         textArea.moveTopLeft( textScale.inverted().map(textArea.topLeft()) );
-
-         //paint text fragment
-         drawTextFragment(    paint,
-                            textArea,
-                            unistr,
-                            &_image[loc(x,y)] ); //,
-                            //0,
-                            //!_isPrinting );
-
-         _fixedFont = save__fixedFont;
-
-         //reset back to single-width, single-height _lines
-         paint.setWorldTransform(textScale.inverted(), true);
-
-         if (y < _lineProperties.size()-1)
-         {
-            //double-height _lines are represented by two adjacent _lines
-            //containing the same characters
-            //both _lines will have the LINE_DOUBLEHEIGHT attribute.
-            //If the current line has the LINE_DOUBLEHEIGHT attribute,
-            //we can therefore skip the next line
-            if (_lineProperties[y] & LINE_DOUBLEHEIGHT)
-                y++;
-         }
-
-        x += len - 1;
-    }
-  }
-}
 
 void TerminalDisplay::blinkEvent()
 {
